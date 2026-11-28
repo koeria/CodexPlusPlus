@@ -846,23 +846,36 @@ pub(crate) async fn handle(
         );
         return Ok(());
     }
-    use tokio::io::AsyncWriteExt;
-    let mut wire = "HTTP/1.1 101 Switching Protocols\r\n".to_string();
-    for (name, value) in response.headers() {
-        wire.push_str(&format!("{}: {}\r\n", name, value.to_str()?));
-    }
-    wire.push_str("\r\n");
-    stream.write_all(wire.as_bytes()).await?;
-    let mut ws =
-        WebSocketStream::from_partially_read(stream, read_ahead, Role::Server, Some(ws_config()))
-            .await;
+    // 与 HTTP 路径对齐（#3333）：WS 握手也要把上报用量压缩实验的策略头发给原生客户端，
+    // 否则客户端 last_usage_includes_reasoning 记为 false，继续本地补算历史推理并提前压缩。
     // 官方身份的本地代理原本再跳一次网关；WS 直接调用同一网关准备入口，避免双重 hooks 与日志。
     if matches!(opener, crate::launcher::ProxyOpener::Legacy)
         && crate::gateway::apply::codex_hops_through_gateway()
     {
         opener = crate::launcher::ProxyOpener::Gateway(crate::tools::ToolId::Codex);
     }
-    let headers = ClientHeaders::read(headers);
+    let handshake_headers = ClientHeaders::read(headers);
+    let codex_usage_policy = !matches!(&opener, crate::launcher::ProxyOpener::Gateway(agent) if *agent != crate::tools::ToolId::Codex)
+        && handshake_headers.identity.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("originator")
+                && matches!(value.as_str(), "Codex Desktop" | "codex_cli_rs" | "codex_exec")
+        })
+        && settings.enhancements_enabled
+        && settings.codex_app_reported_usage_compaction
+        && !crate::extension_gateway::builtin_replaced("builtin:reported-usage-compaction");
+    use tokio::io::AsyncWriteExt;
+    let mut wire = "HTTP/1.1 101 Switching Protocols\r\n".to_string();
+    for (name, value) in response.headers() {
+        wire.push_str(&format!("{}: {}\r\n", name, value.to_str()?));
+    }
+    // 握手阶段尚不知道上游是否自带推理用量；开启实验时按上报口径声明，与 HTTP 路径一致。
+    wire.push_str(crate::launcher::response_usage_headers(false, codex_usage_policy));
+    wire.push_str("\r\n");
+    stream.write_all(wire.as_bytes()).await?;
+    let mut ws =
+        WebSocketStream::from_partially_read(stream, read_ahead, Role::Server, Some(ws_config()))
+            .await;
+    let headers = handshake_headers;
     let registry = Arc::new(Mutex::new(Registry::default()));
     let (events_tx, mut events) = tokio::sync::mpsc::channel(64);
     let (opened_tx, mut opened_rx) = tokio::sync::mpsc::channel(16);

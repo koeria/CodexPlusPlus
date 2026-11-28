@@ -5678,7 +5678,7 @@ async fn handle_chat_completions_proxy_connection(
 }
 
 // 第二个标记区分用户主动选择的本地口径，不能把它记成上游原本提供的事实。
-fn response_usage_headers(upstream_reasoning_included: bool, codex_usage_policy: bool) -> &'static str {
+pub(crate) fn response_usage_headers(upstream_reasoning_included: bool, codex_usage_policy: bool) -> &'static str {
     if upstream_reasoning_included {
         "X-Reasoning-Included: true\r\n"
     } else if codex_usage_policy {
